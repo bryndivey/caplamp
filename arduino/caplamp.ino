@@ -1,7 +1,16 @@
+/*
+  zero crossing on pin 2
+  ssr out on pin 3
+  cap in on pin 4
+*/
+
+#define ZC_PIN 2
 #define SSR_PIN 3
-#define STEPS 2
-#define ZK_PIN 2
-#define DIM_LEVEL OCR1A
+#define CAP_PIN 4
+
+#define STEPS 30
+#define CAP_DELAY 50
+
 // 50Hz cycles are 312.5 counts, so timer will be triggered by ZC before this
 #define INF 65000
 
@@ -98,8 +107,8 @@ void zc_interrupt() {
 }
 
 void setup() {
-  Serial.begin(9600);
   pinMode(SSR_PIN, OUTPUT);
+  
   attachInterrupt(0, zc_interrupt, CHANGE);
 
   // triac switch interrupt
@@ -123,40 +132,34 @@ void setup() {
 }
 
 void do_read() {
+  int fade_dir = 1;
   int on_readings = 0;
-  int cap1 = 0;
-  int cap2 = 0;
+  int consecutive_readings = 0;
+  
   while(1) {
-    cap1 = readCapacitivePin(2);
-    if(cap1 > 1) {
-      delay(200);
-      cap2 = readCapacitivePin(2);
-      if(cap1 == cap2 && cap1 > 1) {
-	on_readings = (on_readings + 1) % STEPS;
-	//analogWrite(TARGET_PIN, map(on_readings, 0, STEPS, 0, 256));
+    consecutive_readings = 0;
+    
+    while(readCapacitivePin(CAP_PIN) > 1) {
+      on_readings = (on_readings + fade_dir);
+      consecutive_readings++;
+      
+      if(on_readings == STEPS || on_readings == 0) {
+	fade_dir = -fade_dir;
       }
-      delay(200);
+      dim_level = map(on_readings, 0, STEPS, 120, 40);
+      delay(CAP_DELAY);
     }
+    // tap turns off
+    if(consecutive_readings > 0 && consecutive_readings < 3) {
+      dim_level = 0;
+      on_readings = 0;
+      fade_dir = 1;
+    }
+    delay(CAP_DELAY);
   }
 }
 
 void loop() {
+  do_read();
 }
 
-void serialEvent() {
-  while (Serial.available()) {
-    char inChar = (char)Serial.read(); 
-    if(inChar == 'a') {
-        dim_level = dim_level - 10;
-    } else if(inChar == 's') {
-        dim_level = dim_level + 10;
-    } else if(inChar == 'j') {
-        dim_level = dim_level - 1;
-    } else if(inChar == 'k')  {
-        dim_level = dim_level + 1;
-    }
-    Serial.println(dim_level);
-  }
-}
-
-  
