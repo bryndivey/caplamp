@@ -4,18 +4,25 @@
   cap in on pin 4
 */
 
+#import "avr/io.h"
+#import "avr/interrupt.h"
+
 #define ZC_PIN 2
 #define SSR_PIN 3
 #define CAP_PIN 4
 
 #define STEPS 30
-#define CAP_DELAY 50
+// this is in ZC cycles
+#define CAP_DELAY 4
+
 
 // 50Hz cycles are 312.5 counts, so timer will be triggered by ZC before this
-#define INF 65000
+#define INF 250
 
 volatile int dim_level = 0;
 volatile int pretrigger = 0;
+volatile int should_measure = 0;
+volatile int cycle_count = 0;
 
 uint8_t readCapacitivePin(int pinToMeasure) {
   // Variables used to translate from Arduino to AVR pin naming
@@ -33,19 +40,19 @@ uint8_t readCapacitivePin(int pinToMeasure) {
   // Discharge the pin first by setting it low and output
   *port &= ~(bitmask);
   *ddr  |= bitmask;
-  delay(1);
+  //delay(1);
   uint8_t SREG_old = SREG; //back up the AVR Status Register
   // Prevent the timer IRQ from disturbing our measurement
   noInterrupts();
   // Make the pin an input with the internal pull-up on
   *ddr &= ~(bitmask);
   *port |= bitmask;
-
+  
   // Now see how long the pin to get pulled up. This manual unrolling of the loop
   // decreases the number of hardware cycles between each read of the pin,
   // thus increasing sensitivity.
   uint8_t cycles = 17;
-       if (*pin & bitmask) { cycles =  0;}
+  if (*pin & bitmask) { cycles =  0;}
   else if (*pin & bitmask) { cycles =  1;}
   else if (*pin & bitmask) { cycles =  2;}
   else if (*pin & bitmask) { cycles =  3;}
@@ -62,10 +69,10 @@ uint8_t readCapacitivePin(int pinToMeasure) {
   else if (*pin & bitmask) { cycles = 14;}
   else if (*pin & bitmask) { cycles = 15;}
   else if (*pin & bitmask) { cycles = 16;}
-
+  
   // End of timing-critical section; turn interrupts back on if they were on before, or leave them off if they were off before
   SREG = SREG_old;
-
+  
   // Discharge the pin again by setting it low and output
   //  It's important to leave the pins low if you want to 
   //  be able to touch more than 1 sensor at a time - if
@@ -74,24 +81,28 @@ uint8_t readCapacitivePin(int pinToMeasure) {
   //  sensors.
   *port &= ~(bitmask);
   *ddr  |= bitmask;
-
+  
   return cycles;
 }
 
 /*
  * Dimmer interrupt - turn on SSR
  */
-ISR(TIMER1_COMPA_vect) {
+ISR(TIMER0_COMPA_vect) {
+  volatile uint8_t* ssr_port = portOutputRegister(digitalPinToPort(SSR_PIN));
+  int ssr_pin = digitalPinToBitMask(SSR_PIN);
+
   if(pretrigger == 1) {
-    digitalWrite(SSR_PIN, 1);
-    pretrigger = 0;
-    OCR1A = 1;
-    TCNT1 = 0;
-  } else {
+    *ssr_port |= ssr_pin;
+    pretrigger = 2;
+    OCR0A = 5;
+    TCNT0 = 0;
+  } else if(pretrigger == 2) {
     // turn off triac, ZC will setup timer again
-    digitalWrite(SSR_PIN, 0);
-    OCR1A = INF;
-    TCNT1 = 0;
+    *ssr_port &= ~(ssr_pin);
+    pretrigger = 0;
+    OCR0A = INF;
+    TCNT0 = 0;
   }
 }
 
@@ -99,67 +110,74 @@ ISR(TIMER1_COMPA_vect) {
  * On zero crossing, reset the dimmer timer.
  */
 void zc_interrupt() {
-  pretrigger = 1;
-  if(dim_level < 310) {
-    OCR1A = dim_level;
-    TCNT1 = 0;
+  // increase cycle count and check if we should measure
+  cycle_count++;
+  
+  if(cycle_count == CAP_DELAY) {
+    cycle_count = 0;
+    should_measure = 1;
   }
+  
+  // set up the timer for the dimming
+  pretrigger = 1;
+  TCNT0 = 0;
+  OCR0A = dim_level;
 }
 
 void setup() {
+  Serial.begin(9600);
   pinMode(SSR_PIN, OUTPUT);
-  
+  pinMode(5, OUTPUT);
   attachInterrupt(0, zc_interrupt, CHANGE);
 
-  // triac switch interrupt
   cli();
+  TCCR0A = 0;
+  TCCR0B = 0;
+  TCNT0 = 0;
 
-  // reset
-  TCCR1A = 0;
-  TCCR1B = 0;
-  TCNT1 = 0;
-  
-  // set target to infinity
-  OCR1A = INF;
+  OCR0A = INF;
 
   // turn on CTC mode
-  TCCR1B |= (1 << WGM12);
+  TCCR0A |= (1 << WGM01);
   // 1024 prescalar (312.5 steps per 50Hz cycle)
-  TCCR1B |= (1 << CS12) | (1 << CS10);   
+  TCCR0B |= (1 << CS02) | (1 << CS00);   
   // enable timer compare interrupt
-  TIMSK1 |= (1 << OCIE1A);
+  TIMSK0 |= (1 << OCIE0A);
+  
   sei();
 }
 
-void do_read() {
-  int fade_dir = 1;
-  int on_readings = 0;
-  int consecutive_readings = 0;
-  
-  while(1) {
-    consecutive_readings = 0;
-    
-    while(readCapacitivePin(CAP_PIN) > 1) {
-      on_readings = (on_readings + fade_dir);
-      consecutive_readings++;
-      
-      if(on_readings == STEPS || on_readings == 0) {
-	fade_dir = -fade_dir;
-      }
-      dim_level = map(on_readings, 0, STEPS, 120, 40);
-      delay(CAP_DELAY);
-    }
-    // tap turns off
-    if(consecutive_readings > 0 && consecutive_readings < 3) {
-      dim_level = 0;
-      on_readings = 0;
-      fade_dir = 1;
-    }
-    delay(CAP_DELAY);
-  }
-}
+
+int consecutive_touches = 0;
+int fade_dir = 1;
+int level = 0;
 
 void loop() {
-  do_read();
+  if(should_measure) {
+    Serial.print("Measured ");
+    Serial.println(dim_level);
+    should_measure = 0;
+    int cap = readCapacitivePin(CAP_PIN);
+    
+    if(cap > 1) {
+      level = level + fade_dir;
+      if(consecutive_touches < 20) {
+	consecutive_touches ++;
+      }
+
+      if(level >= STEPS || level <= 0) {
+	fade_dir = -fade_dir;
+      }
+      dim_level = map(level, 0, STEPS, 120, 50);
+    } else {
+      // tap turns off
+      if(consecutive_touches > 0 && consecutive_touches < 3) {
+	level = 0;
+	dim_level = 0;
+	fade_dir = 1;
+      }
+      consecutive_touches = 0;
+    }
+  }
 }
 
