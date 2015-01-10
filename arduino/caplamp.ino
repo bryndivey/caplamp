@@ -141,8 +141,6 @@ void do_read() {
 }
 
 void loop() {
-  Serial.println(pretrigger);
-  delay(10);
 }
 
 void serialEvent() {
