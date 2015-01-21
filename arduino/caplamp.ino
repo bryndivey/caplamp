@@ -100,7 +100,7 @@ uint16_t touch_measure(){
  
   for (i=0 ; i<CAP_READS ; i++){
     CAP_PORT |= (1 << CAP); // pullup on
-    _delay_us(200);
+    _delay_ms(1);
     CAP_PORT &= ~(1 << CAP); // pullup off
     
     adc_channel(ADC_GND); //set ADC mux to ground;
