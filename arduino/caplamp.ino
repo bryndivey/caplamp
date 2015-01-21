@@ -129,12 +129,6 @@ ISR(TIMER0_COMPA_vect) {
     PORT |= (1 << SSR);
     // retrigger for turn off
     TCNT0 = 0;
-    OCR0A = 1;
-  } else if(pretrigger == 2) {
-    // turn off triac, ZC will setup timer again
-    pretrigger = 0;
-    PORT &= ~(1 << SSR);
-    TCNT0 = 0;
     OCR0A = 255;
 #ifdef ATTINY
     TIMSK &= ~(1 << OCIE0A);
@@ -222,6 +216,12 @@ int fade_dir = 1;
 int level = 0;
 
 void loop() {
+  if(pretrigger == 2) {
+    // turn off triac, ZC will setup timer again
+    pretrigger = 0;
+    PORT &= ~(1 << SSR);
+  }
+  
   if(should_measure) {
     should_measure = 0;
 
