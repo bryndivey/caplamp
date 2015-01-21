@@ -4,115 +4,153 @@
   cap in on pin 4
 */
 
-#import "avr/io.h"
-#import "avr/interrupt.h"
+#include "avr/io.h"
+#include "avr/interrupt.h"
+#include "avr/delay.h"
 
-#define ZC_PIN 2
-#define SSR_PIN 3
-#define CAP_PIN 4
+#define ATTINY 1
+
+#ifdef ATTINY
+
+#include <TinyDebugSerial.h>
+TinyDebugSerial mySerial = TinyDebugSerial();
+
+#define SERIAL mySerial
+
+#define PORT PORTB
+#define PIN PINB
+#define DDR DDRB
+
+#define ADC_CLEAR 0b1111
+#define ADC_GND 0b1101
+
+#define CAP 4
+#define CAP_DDR DDRB
+#define CAP_PORT PORTB
+#define CAP_CHAN 2
+#define DEBUG 1
+#define SSR 0
+
+#else
+
+#define SERIAL Serial
+
+#define PORT PORTD
+#define PIN PIND
+#define DDR DDRD
+
+#define ADC_CLEAR 0b1111
+#define ADC_GND 0b1111
+
+#define CAP 2
+#define CAP_DDR DDRC
+#define CAP_PORT PORTC
+#define CAP_CHAN 2
+#define DEBUG 6
+#define SSR 3
+
+#endif
+
+#define ZC 2
 
 #define STEPS 30
 // this is in ZC cycles
 #define CAP_DELAY 4
+#define CAP_LEVEL 200
+#define CAP_READS 4
+#define TAP_COUNT 3
 
-
-// 50Hz cycles are 312.5 counts, so timer will be triggered by ZC before this
-#define INF 250
-
-volatile int dim_level = 0;
+volatile int dim_level = 90;
 volatile int pretrigger = 0;
 volatile int should_measure = 0;
 volatile int cycle_count = 0;
 
-uint8_t readCapacitivePin(int pinToMeasure) {
-  // Variables used to translate from Arduino to AVR pin naming
-  volatile uint8_t* port;
-  volatile uint8_t* ddr;
-  volatile uint8_t* pin;
-  // Here we translate the input pin number from
-  //  Arduino pin number to the AVR PORT, PIN, DDR,
-  //  and which bit of those registers we care about.
-  byte bitmask;
-  port = portOutputRegister(digitalPinToPort(pinToMeasure));
-  ddr = portModeRegister(digitalPinToPort(pinToMeasure));
-  bitmask = digitalPinToBitMask(pinToMeasure);
-  pin = portInputRegister(digitalPinToPort(pinToMeasure));
-  // Discharge the pin first by setting it low and output
-  *port &= ~(bitmask);
-  *ddr  |= bitmask;
-  //delay(1);
-  uint8_t SREG_old = SREG; //back up the AVR Status Register
-  // Prevent the timer IRQ from disturbing our measurement
-  noInterrupts();
-  // Make the pin an input with the internal pull-up on
-  *ddr &= ~(bitmask);
-  *port |= bitmask;
+void debug_pulse(int us) {
+  PORT |= (1 << DEBUG);
+  _delay_us(us * 10);
+  PORT &= ~(1 << DEBUG);
+}
+
+void debug_number(int num) {
+  for(int i=15; i>=0; i--) {
+    if(num & (1 << i)) {
+      debug_pulse(5);
+    } else {
+      debug_pulse(1);
+    }
+  }
+}
+
+static inline void adc_channel(uint8_t channel){
+  ADMUX &= ~(ADC_CLEAR);
+  ADMUX |=   0b1111 & channel;
+}
+
+static inline uint16_t adc_get(void){
+  ADCSRA |= (1 << ADSC); //start conversion
+  loop_until_bit_is_clear(ADCSRA, ADSC); // wait for finish
+  return ADC; //return value
+}
+
+uint16_t touch_measure(){
+  uint8_t i;
+  uint16_t retval;
   
-  // Now see how long the pin to get pulled up. This manual unrolling of the loop
-  // decreases the number of hardware cycles between each read of the pin,
-  // thus increasing sensitivity.
-  uint8_t cycles = 17;
-  if (*pin & bitmask) { cycles =  0;}
-  else if (*pin & bitmask) { cycles =  1;}
-  else if (*pin & bitmask) { cycles =  2;}
-  else if (*pin & bitmask) { cycles =  3;}
-  else if (*pin & bitmask) { cycles =  4;}
-  else if (*pin & bitmask) { cycles =  5;}
-  else if (*pin & bitmask) { cycles =  6;}
-  else if (*pin & bitmask) { cycles =  7;}
-  else if (*pin & bitmask) { cycles =  8;}
-  else if (*pin & bitmask) { cycles =  9;}
-  else if (*pin & bitmask) { cycles = 10;}
-  else if (*pin & bitmask) { cycles = 11;}
-  else if (*pin & bitmask) { cycles = 12;}
-  else if (*pin & bitmask) { cycles = 13;}
-  else if (*pin & bitmask) { cycles = 14;}
-  else if (*pin & bitmask) { cycles = 15;}
-  else if (*pin & bitmask) { cycles = 16;}
-  
-  // End of timing-critical section; turn interrupts back on if they were on before, or leave them off if they were off before
-  SREG = SREG_old;
-  
-  // Discharge the pin again by setting it low and output
-  //  It's important to leave the pins low if you want to 
-  //  be able to touch more than 1 sensor at a time - if
-  //  the sensor is left pulled high, when you touch
-  //  two sensors, your body will transfer the charge between
-  //  sensors.
-  *port &= ~(bitmask);
-  *ddr  |= bitmask;
-  
-  return cycles;
+  retval = 0;
+ 
+  for (i=0 ; i<CAP_READS ; i++){
+    CAP_PORT |= (1 << CAP); // pullup on
+    _delay_us(200);
+    CAP_PORT &= ~(1 << CAP); // pullup off
+    
+    adc_channel(ADC_GND); //set ADC mux to ground;
+    adc_get();            //do a measurement (to discharge the sampling cap)
+    
+    adc_channel(CAP_CHAN); //set mux to right channel
+    retval +=  adc_get(); //do a conversion
+  }
+  return retval / CAP_READS;
+}
+
+static inline void enable_int0(volatile int delay) {
+  // clear flag
+}
+
+static inline void disable_int0() {
 }
 
 /*
  * Dimmer interrupt - turn on SSR
  */
 ISR(TIMER0_COMPA_vect) {
-  volatile uint8_t* ssr_port = portOutputRegister(digitalPinToPort(SSR_PIN));
-  int ssr_pin = digitalPinToBitMask(SSR_PIN);
-
+  debug_pulse(1);
   if(pretrigger == 1) {
-    *ssr_port |= ssr_pin;
     pretrigger = 2;
-    OCR0A = 5;
+    PORT |= (1 << SSR);
+    // retrigger for turn off
     TCNT0 = 0;
+    OCR0A = 1;
   } else if(pretrigger == 2) {
     // turn off triac, ZC will setup timer again
-    *ssr_port &= ~(ssr_pin);
     pretrigger = 0;
-    OCR0A = INF;
+    PORT &= ~(1 << SSR);
     TCNT0 = 0;
+    OCR0A = 255;
+#ifdef ATTINY
+    TIMSK &= ~(1 << OCIE0A);
+#else
+    TIMSK0 &= ~(1 << OCIE0A);
+#endif
   }
 }
 
 /*
  * On zero crossing, reset the dimmer timer.
  */
-void zc_interrupt() {
+ISR(INT0_vect) {
   // increase cycle count and check if we should measure
   cycle_count++;
-  
+
   if(cycle_count == CAP_DELAY) {
     cycle_count = 0;
     should_measure = 1;
@@ -120,29 +158,60 @@ void zc_interrupt() {
   
   // set up the timer for the dimming
   pretrigger = 1;
+  TIFR |= (1 << OCF0A);
   TCNT0 = 0;
   OCR0A = dim_level;
+  #ifdef ATTINY
+  TIMSK |= (1 << OCIE0A);
+  #else
+  TIMSK0 |= (1 << OCIE0A);
+  #endif
 }
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(SSR_PIN, OUTPUT);
-  pinMode(5, OUTPUT);
-  attachInterrupt(0, zc_interrupt, CHANGE);
+  SERIAL.begin(9600);
+
+  DDR |= (1 << SSR) | (1 << DEBUG);
 
   cli();
+
+  // INT0 change interrupt for ZC detection
+  #ifdef ATTINY
+  MCUCR |= (1 << ISC00);
+  GIMSK |= (1 << INT0);
+  #else
+  EICRA |= (1 << ISC00);
+  EIMSK |= (1 << INT0);
+  #endif
+
+  // timer interrupt for dim trigger
   TCCR0A = 0;
   TCCR0B = 0;
-  TCNT0 = 0;
-
-  OCR0A = INF;
 
   // turn on CTC mode
   TCCR0A |= (1 << WGM01);
-  // 1024 prescalar (312.5 steps per 50Hz cycle)
-  TCCR0B |= (1 << CS02) | (1 << CS00);   
-  // enable timer compare interrupt
-  TIMSK0 |= (1 << OCIE0A);
+
+  #ifdef ATTINY
+  // 64 prescalar for 1MHz
+  TCCR0B |= (1 << CS01) | (1 << CS00);
+  #else
+  // 256 for 8Mhz
+  TCCR0B |= (1 << CS02) | (1 << CS00);
+  #endif
+
+
+  // capsense
+  #ifdef ATTINY
+  // VCC reference
+  ADMUX &= ~((1 << REFS1) | (1 << REFS0));
+  // enable, prescalar is 8 
+  ADCSRA |= (1 << ADEN) | (1 << ADPS1) | (1 << ADPS0);
+  #else
+  // VCC ref
+  ADMUX |= (1 << REFS0);
+  // enable, 64 prescale
+  ADCSRA |= (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1);
+  #endif
   
   sei();
 }
@@ -154,24 +223,23 @@ int level = 0;
 
 void loop() {
   if(should_measure) {
-    Serial.print("Measured ");
-    Serial.println(dim_level);
     should_measure = 0;
-    int cap = readCapacitivePin(CAP_PIN);
+
+    int cap = touch_measure();
     
-    if(cap > 1) {
+    if(cap > CAP_LEVEL) {
       level = level + fade_dir;
-      if(consecutive_touches < 20) {
+      if(consecutive_touches < TAP_COUNT) {
 	consecutive_touches ++;
       }
 
       if(level >= STEPS || level <= 0) {
 	fade_dir = -fade_dir;
       }
-      dim_level = map(level, 0, STEPS, 120, 50);
+      dim_level = map(level, 0, STEPS, 90, 20);
     } else {
       // tap turns off
-      if(consecutive_touches > 0 && consecutive_touches < 3) {
+      if(consecutive_touches > 0 && consecutive_touches < TAP_COUNT) {
 	level = 0;
 	dim_level = 0;
 	fade_dir = 1;
