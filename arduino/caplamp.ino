@@ -1,21 +1,13 @@
 /*
-  zero crossing on pin 2
-  ssr out on pin 3
-  cap in on pin 4
+  zero crossing on PB3
+  ssr out on PB0
+  cap in on PB4
 */
 
 #include "avr/io.h"
 #include "avr/interrupt.h"
 #include "avr/delay.h"
-
-#define ATTINY 1
-
-#ifdef ATTINY
-
-#include <TinyDebugSerial.h>
-TinyDebugSerial mySerial = TinyDebugSerial();
-
-#define SERIAL mySerial
+#include "BasicSerial.h"
 
 #define PORT PORTB
 #define PIN PINB
@@ -31,54 +23,30 @@ TinyDebugSerial mySerial = TinyDebugSerial();
 #define DEBUG 1
 #define SSR 0
 
-#else
-
-#define SERIAL Serial
-
-#define PORT PORTD
-#define PIN PIND
-#define DDR DDRD
-
-#define ADC_CLEAR 0b1111
-#define ADC_GND 0b1111
-
-#define CAP 2
-#define CAP_DDR DDRC
-#define CAP_PORT PORTC
-#define CAP_CHAN 2
-#define DEBUG 6
-#define SSR 3
-
-#endif
-
-#define ZC 2
-
 #define STEPS 30
 // this is in ZC cycles
 #define CAP_DELAY 4
-#define CAP_LEVEL 200
-#define CAP_READS 4
+
+// 200 for copper, 300 for lamp
+#define CAP_LEVEL 300
+#define CAP_READS 8
 #define TAP_COUNT 3
+#define BASELINE_READINGS 10
 
 volatile int dim_level = 90;
 volatile int pretrigger = 0;
 volatile int should_measure = 0;
-volatile int cycle_count = 0;
+volatile int cycle_count = CAP_DELAY;
+unsigned int baseline = 0;
+
+void serOut(const char* str) {
+   while (*str) TxByte (*str++);
+}
 
 void debug_pulse(int us) {
   PORT |= (1 << DEBUG);
   _delay_us(us * 10);
   PORT &= ~(1 << DEBUG);
-}
-
-void debug_number(int num) {
-  for(int i=15; i>=0; i--) {
-    if(num & (1 << i)) {
-      debug_pulse(5);
-    } else {
-      debug_pulse(1);
-    }
-  }
 }
 
 static inline void adc_channel(uint8_t channel){
@@ -112,71 +80,60 @@ uint16_t touch_measure(){
   return retval / CAP_READS;
 }
 
-static inline void enable_int0(volatile int delay) {
-  // clear flag
-}
-
-static inline void disable_int0() {
-}
-
 /*
  * Dimmer interrupt - turn on SSR
  */
 ISR(TIMER0_COMPA_vect) {
-  debug_pulse(1);
   if(pretrigger == 1) {
     pretrigger = 2;
     PORT |= (1 << SSR);
-    // retrigger for turn off
+    TCNT0 = 0;
+    OCR0A = 4;
+  } else if(pretrigger == 2) {
+    pretrigger = 0;
+    PORT &= ~(1<< SSR);
     TCNT0 = 0;
     OCR0A = 255;
-#ifdef ATTINY
     TIMSK &= ~(1 << OCIE0A);
-#else
-    TIMSK0 &= ~(1 << OCIE0A);
-#endif
   }
 }
 
 /*
  * On zero crossing, reset the dimmer timer.
  */
-ISR(INT0_vect) {
-  // increase cycle count and check if we should measure
-  cycle_count++;
-
-  if(cycle_count == CAP_DELAY) {
-    cycle_count = 0;
+ISR(PCINT0_vect) {
+  if(cycle_count == 1) {
     should_measure = 1;
+  } else if(cycle_count == 0) {
+    cycle_count = CAP_DELAY;
   }
+  // decrease cycle count and check if we should measure
+  cycle_count--;
   
   // set up the timer for the dimming
   pretrigger = 1;
   TIFR |= (1 << OCF0A);
   TCNT0 = 0;
   OCR0A = dim_level;
-  #ifdef ATTINY
   TIMSK |= (1 << OCIE0A);
-  #else
-  TIMSK0 |= (1 << OCIE0A);
-  #endif
 }
 
 void setup() {
-  SERIAL.begin(9600);
+  // get a baseline reading to compare the cap reading to
+
+  for(int i=0; i<BASELINE_READINGS; i++) {
+    baseline += touch_measure();
+  }
+
+  baseline /= BASELINE_READINGS;
 
   DDR |= (1 << SSR) | (1 << DEBUG);
 
   cli();
 
-  // INT0 change interrupt for ZC detection
-  #ifdef ATTINY
-  MCUCR |= (1 << ISC00);
-  GIMSK |= (1 << INT0);
-  #else
-  EICRA |= (1 << ISC00);
-  EIMSK |= (1 << INT0);
-  #endif
+  // pin change interrupts
+  GIMSK |= (1 << PCIE);
+  PCMSK |= (1 << PCINT3);
 
   // timer interrupt for dim trigger
   TCCR0A = 0;
@@ -185,29 +142,17 @@ void setup() {
   // turn on CTC mode
   TCCR0A |= (1 << WGM01);
 
-  #ifdef ATTINY
   // 64 prescalar for 1MHz
   TCCR0B |= (1 << CS01) | (1 << CS00);
-  #else
-  // 256 for 8Mhz
-  TCCR0B |= (1 << CS02) | (1 << CS00);
-  #endif
-
 
   // capsense
-  #ifdef ATTINY
   // VCC reference
   ADMUX &= ~((1 << REFS1) | (1 << REFS0));
   // enable, prescalar is 8 
   ADCSRA |= (1 << ADEN) | (1 << ADPS1) | (1 << ADPS0);
-  #else
-  // VCC ref
-  ADMUX |= (1 << REFS0);
-  // enable, 64 prescale
-  ADCSRA |= (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1);
-  #endif
   
   sei();
+
 }
 
 
@@ -216,16 +161,20 @@ int fade_dir = 1;
 int level = 0;
 
 void loop() {
-  if(pretrigger == 2) {
-    // turn off triac, ZC will setup timer again
-    pretrigger = 0;
-    PORT &= ~(1 << SSR);
-  }
-  
   if(should_measure) {
     should_measure = 0;
 
-    int cap = touch_measure();
+#ifndef CYCLE
+    int cap = touch_measure() - baseline;
+#else
+    int cap = CAP_LEVEL + 1;
+#endif
+
+    if(cap > CAP_LEVEL) {
+      for(int i=0; i< ((cap - CAP_LEVEL) / 10); i++) {
+	debug_pulse(1);
+      }
+    }
     
     if(cap > CAP_LEVEL) {
       level = level + fade_dir;
@@ -236,7 +185,7 @@ void loop() {
       if(level >= STEPS || level <= 0) {
 	fade_dir = -fade_dir;
       }
-      dim_level = map(level, 0, STEPS, 90, 20);
+      dim_level = map(level, 0, STEPS, 110, 20);
     } else {
       // tap turns off
       if(consecutive_touches > 0 && consecutive_touches < TAP_COUNT) {
