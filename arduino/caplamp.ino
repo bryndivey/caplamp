@@ -7,7 +7,6 @@
 #include "avr/io.h"
 #include "avr/interrupt.h"
 #include "avr/delay.h"
-#include "BasicSerial.h"
 
 #define PORT PORTB
 #define PIN PINB
@@ -28,7 +27,7 @@
 #define CAP_DELAY 4
 
 // 200 for copper, 300 for lamp
-#define CAP_LEVEL 300
+#define CAP_LEVEL 30
 #define CAP_READS 8
 #define TAP_COUNT 3
 #define BASELINE_READINGS 10
@@ -38,10 +37,6 @@ volatile int pretrigger = 0;
 volatile int should_measure = 0;
 volatile int cycle_count = CAP_DELAY;
 unsigned int baseline = 0;
-
-void serOut(const char* str) {
-   while (*str) TxByte (*str++);
-}
 
 void debug_pulse(int us) {
   PORT |= (1 << DEBUG);
@@ -123,6 +118,7 @@ void setup() {
 
   for(int i=0; i<BASELINE_READINGS; i++) {
     baseline += touch_measure();
+    _delay_ms(10);
   }
 
   baseline /= BASELINE_READINGS;
@@ -170,12 +166,6 @@ void loop() {
     int cap = CAP_LEVEL + 1;
 #endif
 
-    if(cap > CAP_LEVEL) {
-      for(int i=0; i< ((cap - CAP_LEVEL) / 10); i++) {
-	debug_pulse(1);
-      }
-    }
-    
     if(cap > CAP_LEVEL) {
       level = level + fade_dir;
       if(consecutive_touches < TAP_COUNT) {
